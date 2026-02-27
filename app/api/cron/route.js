@@ -35,7 +35,7 @@ export async function GET(request) {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-opus-4-20250514",
         max_tokens: 16000,
         system: `You are a senior financial analyst. Deliver a comprehensive morning market intelligence briefing. Search for TODAY's most important news from Yahoo Finance, Bloomberg, Reuters, CNBC, FT, WSJ, MarketWatch, and credible blogs. Cover: Fed policy, tech/AI, energy, banking, healthcare, crypto, geopolitics, real estate, and general business news.
 

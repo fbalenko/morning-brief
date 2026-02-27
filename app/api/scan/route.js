@@ -36,22 +36,8 @@ CONFIDENCE SCORING:
 - 50-69: Moderate, some uncertainty in implications
 - Below 50: Speculative, limited data
 
-Respond ONLY with a valid JSON array (no markdown, no backticks, no extra text). Each object must have these EXACT keys:
-{
-  "headline": "string",
-  "source": "string (publication name)",
-  "sourceUrl": "string (actual URL)",
-  "sector": "string (from: Macro & Fed, Tech & AI, Energy, Banking, Healthcare, Crypto, Geopolitics, Real Estate, General News)",
-  "signal": "BULLISH | BEARISH | NEUTRAL | VOLATILE",
-  "impact": "HIGH | MEDIUM | LOW",
-  "timeHorizon": "SHORT | MEDIUM | LONG",
-  "confidence": number (0-100),
-  "tickers": ["array", "of", "symbols"],
-  "tickerPrices": {"SYMBOL": "+2.3%"},
-  "analysis": "string (3-5 sentences, thorough expert analysis)",
-  "actionable": "string (specific what-to-do insight)",
-  "keyTakeaway": "string (one-sentence summary for quick scanning)"
-}
+Respond ONLY with a valid JSON array (no markdown, no backticks, no explanation before or after). Each object must have these EXACT keys:
+{"headline":"string","source":"string","sourceUrl":"string","sector":"Macro & Fed|Tech & AI|Energy|Banking|Healthcare|Crypto|Geopolitics|Real Estate|General News","signal":"BULLISH|BEARISH|NEUTRAL|VOLATILE","impact":"HIGH|MEDIUM|LOW","timeHorizon":"SHORT|MEDIUM|LONG","confidence":number,"tickers":["array"],"tickerPrices":{"SYM":"+1.2%"},"analysis":"string","actionable":"string","keyTakeaway":"string"}
 
 Return 10-14 items. Be thorough. Use real data. No hallucinating prices or events.`;
 
@@ -70,7 +56,7 @@ export async function POST(request) {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-opus-4-20250514",
         max_tokens: 16000,
         system: SYSTEM_PROMPT,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
@@ -82,48 +68,43 @@ export async function POST(request) {
 
     if (!apiResponse.ok) {
       console.error("Anthropic error:", JSON.stringify(data, null, 2));
-      const msg = data?.error?.message || `Anthropic API returned ${apiResponse.status}`;
+      const msg = data?.error?.message || `API returned ${apiResponse.status}`;
       return NextResponse.json({ error: msg }, { status: 502 });
     }
 
-    // Extract all text blocks from the response
-    const textBlocks = (data.content || [])
+    const text = (data.content || [])
       .filter((block) => block.type === "text")
-      .map((block) => block.text);
-
-    const text = textBlocks.join("\n");
+      .map((block) => block.text)
+      .join("\n");
 
     if (!text.trim()) {
-      console.error("No text in response. Content types:", data.content?.map(c => c.type));
       return NextResponse.json(
-        { error: "AI returned no text content. It may still be processing web searches." },
+        { error: "AI returned no text. Please try again." },
         { status: 500 }
       );
     }
 
-    // Parse JSON from the response
     let parsed;
     const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
     try {
       parsed = JSON.parse(cleaned);
     } catch {
-      // Try to find a JSON array in the text
       const match = text.match(/\[[\s\S]*\]/);
       if (match) {
         try {
           parsed = JSON.parse(match[0]);
-        } catch (innerErr) {
-          console.error("JSON parse failed. First 500 chars:", text.substring(0, 500));
+        } catch {
+          console.error("Parse failed:", text.substring(0, 500));
           return NextResponse.json(
-            { error: "AI response was not valid JSON. Please try again." },
+            { error: "Could not parse AI response. Please try again." },
             { status: 500 }
           );
         }
       } else {
-        console.error("No JSON array found. First 500 chars:", text.substring(0, 500));
+        console.error("No JSON array found:", text.substring(0, 500));
         return NextResponse.json(
-          { error: "AI response did not contain expected data. Please try again." },
+          { error: "AI response format error. Please try again." },
           { status: 500 }
         );
       }
@@ -131,14 +112,14 @@ export async function POST(request) {
 
     if (!Array.isArray(parsed) || parsed.length === 0) {
       return NextResponse.json(
-        { error: "No news items returned. Please try again." },
+        { error: "No news items returned." },
         { status: 500 }
       );
     }
 
     return NextResponse.json({ items: parsed });
   } catch (err) {
-    console.error("Scan route error:", err);
+    console.error("Scan error:", err);
     return NextResponse.json(
       { error: err.message || "Internal server error" },
       { status: 500 }
