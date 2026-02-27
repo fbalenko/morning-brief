@@ -1,7 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const SYSTEM_PROMPT = `You are a senior financial analyst and market strategist at a top-tier investment research firm. Your job is to deliver a comprehensive morning market intelligence briefing.
 
@@ -16,7 +13,7 @@ NEWS CATEGORIES TO COVER:
 - Federal Reserve & central bank policy, interest rates, inflation data
 - Major earnings, revenue beats/misses, forward guidance
 - Geopolitical events (wars, sanctions, elections, trade deals)
-- Regulatory changes (SEC, FDA, antitrust, crypto regulation)  
+- Regulatory changes (SEC, FDA, antitrust, crypto regulation)
 - Sector catalysts (tech launches, drug approvals, energy supply disruptions)
 - Macro indicators (jobs reports, GDP, CPI, PMI, consumer confidence)
 - Crypto & digital assets (ETF flows, regulation, major moves)
@@ -39,7 +36,7 @@ CONFIDENCE SCORING:
 - 50-69: Moderate, some uncertainty in implications
 - Below 50: Speculative, limited data
 
-Respond ONLY with a valid JSON array. Each object must have these EXACT keys:
+Respond ONLY with a valid JSON array (no markdown, no backticks, no extra text). Each object must have these EXACT keys:
 {
   "headline": "string",
   "source": "string (publication name)",
@@ -50,7 +47,7 @@ Respond ONLY with a valid JSON array. Each object must have these EXACT keys:
   "timeHorizon": "SHORT | MEDIUM | LONG",
   "confidence": number (0-100),
   "tickers": ["array", "of", "symbols"],
-  "tickerPrices": {"SYMBOL": "+2.3%"} or {"SYMBOL": "$185.40 (+1.2%)"},
+  "tickerPrices": {"SYMBOL": "+2.3%"},
   "analysis": "string (3-5 sentences, thorough expert analysis)",
   "actionable": "string (specific what-to-do insight)",
   "keyTakeaway": "string (one-sentence summary for quick scanning)"
@@ -60,33 +57,73 @@ Return 10-14 items. Be thorough. Use real data. No hallucinating prices or event
 
 export async function POST(request) {
   try {
-    const { query } = await request.json();
+    const body = await request.json();
+    const query = body?.query || "";
 
     const userMessage = `Search for today's most important financial and general news that affects markets. Be thorough — search multiple topics: stock market today, Fed policy, tech earnings, oil prices, crypto news, geopolitics, economic data releases, and any major breaking news. ${query ? `EXTRA FOCUS: ${query}` : ""} Return the JSON array with real URLs and current data.`;
 
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8000,
-      system: SYSTEM_PROMPT,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content: userMessage }],
+    const apiResponse = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 16000,
+        system: SYSTEM_PROMPT,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages: [{ role: "user", content: userMessage }],
+      }),
     });
 
-    const text = response.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("");
+    const data = await apiResponse.json();
 
+    if (!apiResponse.ok) {
+      console.error("Anthropic error:", JSON.stringify(data, null, 2));
+      const msg = data?.error?.message || `Anthropic API returned ${apiResponse.status}`;
+      return NextResponse.json({ error: msg }, { status: 502 });
+    }
+
+    // Extract all text blocks from the response
+    const textBlocks = (data.content || [])
+      .filter((block) => block.type === "text")
+      .map((block) => block.text);
+
+    const text = textBlocks.join("\n");
+
+    if (!text.trim()) {
+      console.error("No text in response. Content types:", data.content?.map(c => c.type));
+      return NextResponse.json(
+        { error: "AI returned no text content. It may still be processing web searches." },
+        { status: 500 }
+      );
+    }
+
+    // Parse JSON from the response
     let parsed;
+    const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
+
     try {
-      parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      parsed = JSON.parse(cleaned);
     } catch {
+      // Try to find a JSON array in the text
       const match = text.match(/\[[\s\S]*\]/);
       if (match) {
-        parsed = JSON.parse(match[0]);
+        try {
+          parsed = JSON.parse(match[0]);
+        } catch (innerErr) {
+          console.error("JSON parse failed. First 500 chars:", text.substring(0, 500));
+          return NextResponse.json(
+            { error: "AI response was not valid JSON. Please try again." },
+            { status: 500 }
+          );
+        }
       } else {
+        console.error("No JSON array found. First 500 chars:", text.substring(0, 500));
         return NextResponse.json(
-          { error: "Failed to parse AI response" },
+          { error: "AI response did not contain expected data. Please try again." },
           { status: 500 }
         );
       }
@@ -94,14 +131,14 @@ export async function POST(request) {
 
     if (!Array.isArray(parsed) || parsed.length === 0) {
       return NextResponse.json(
-        { error: "No results returned" },
+        { error: "No news items returned. Please try again." },
         { status: 500 }
       );
     }
 
     return NextResponse.json({ items: parsed });
   } catch (err) {
-    console.error("Scan error:", err);
+    console.error("Scan route error:", err);
     return NextResponse.json(
       { error: err.message || "Internal server error" },
       { status: 500 }

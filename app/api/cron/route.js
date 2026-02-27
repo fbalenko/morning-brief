@@ -1,13 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { Resend } from "resend";
 import { NextResponse } from "next/server";
 
-// This route is called by Vercel Cron Jobs on a schedule.
-// To enable it, update vercel.json with:
-// "crons": [{ "path": "/api/cron", "schedule": "0 12 * * 1-5" }]
-// 0 12 * * 1-5 = 12:00 UTC (7:00 AM EST) on weekdays
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 const SIGNAL_COLORS = {
@@ -24,7 +17,6 @@ const SIGNAL_LABELS = {
 };
 
 export async function GET(request) {
-  // Verify the request is from Vercel Cron (optional security)
   const authHeader = request.headers.get("authorization");
   if (
     process.env.CRON_SECRET &&
@@ -35,28 +27,42 @@ export async function GET(request) {
 
   try {
     // Step 1: Scan markets
-    const scanResponse = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8000,
-      system: `You are a senior financial analyst. Deliver a comprehensive morning market intelligence briefing. Search for TODAY's most important news from Yahoo Finance, Bloomberg, Reuters, CNBC, FT, WSJ, MarketWatch, and credible blogs. Cover: Fed policy, tech/AI, energy, banking, healthcare, crypto, geopolitics, real estate, and general business news.
+    const apiResponse = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 16000,
+        system: `You are a senior financial analyst. Deliver a comprehensive morning market intelligence briefing. Search for TODAY's most important news from Yahoo Finance, Bloomberg, Reuters, CNBC, FT, WSJ, MarketWatch, and credible blogs. Cover: Fed policy, tech/AI, energy, banking, healthcare, crypto, geopolitics, real estate, and general business news.
 
 For each item provide thorough 3-5 sentence analysis, actionable insights with specific tickers, confidence score (0-100), and source URLs.
 
-Respond ONLY with a valid JSON array. Each object: { "headline", "source", "sourceUrl", "sector", "signal" (BULLISH|BEARISH|NEUTRAL|VOLATILE), "impact" (HIGH|MEDIUM|LOW), "timeHorizon" (SHORT|MEDIUM|LONG), "confidence" (number), "tickers" (array), "tickerPrices" (object), "analysis", "actionable", "keyTakeaway" }. Return 10-14 items.`,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [
-        {
-          role: "user",
-          content:
-            "Search for today's most important financial news. Cover all sectors. Return JSON.",
-        },
-      ],
+Respond ONLY with a valid JSON array (no markdown, no backticks). Each object: { "headline", "source", "sourceUrl", "sector", "signal" (BULLISH|BEARISH|NEUTRAL|VOLATILE), "impact" (HIGH|MEDIUM|LOW), "timeHorizon" (SHORT|MEDIUM|LONG), "confidence" (number), "tickers" (array), "tickerPrices" (object), "analysis", "actionable", "keyTakeaway" }. Return 10-14 items.`,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages: [
+          {
+            role: "user",
+            content:
+              "Search for today's most important financial news. Cover all sectors. Return JSON.",
+          },
+        ],
+      }),
     });
 
-    const text = scanResponse.content
+    const data = await apiResponse.json();
+
+    if (!apiResponse.ok) {
+      return NextResponse.json({ error: data?.error?.message || "Anthropic API failed" }, { status: 500 });
+    }
+
+    const text = (data.content || [])
       .filter((b) => b.type === "text")
       .map((b) => b.text)
-      .join("");
+      .join("\n");
 
     let items;
     try {
@@ -70,19 +76,10 @@ Respond ONLY with a valid JSON array. Each object: { "headline", "source", "sour
       return NextResponse.json({ error: "No items from scan" }, { status: 500 });
     }
 
-    // Step 2: Build email HTML
+    // Step 2: Build email
     const now = new Date();
-    const dateStr = now.toLocaleDateString("en-US", {
-      weekday: "long",
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-    const timeStr = now.toLocaleTimeString("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-
+    const dateStr = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+    const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
     const bull = items.filter((n) => n.signal === "BULLISH").length;
     const bear = items.filter((n) => n.signal === "BEARISH").length;
     const high = items.filter((n) => n.impact === "HIGH");
@@ -103,7 +100,6 @@ Respond ONLY with a valid JSON array. Each object: { "headline", "source", "sour
   </tr></table>
 </div>`;
 
-    // Priority alerts
     if (high.length > 0) {
       html += `<div style="padding:28px 36px;border-bottom:1px solid #e0dbd2;">
         <h2 style="font-size:13px;text-transform:uppercase;letter-spacing:3px;color:#c0392b;margin:0 0 20px;font-weight:600;">&#x1F6A8; Priority Alerts</h2>`;
@@ -123,7 +119,6 @@ Respond ONLY with a valid JSON array. Each object: { "headline", "source", "sour
       html += `</div>`;
     }
 
-    // All items
     html += `<div style="padding:28px 36px;">
       <h2 style="font-size:13px;text-transform:uppercase;letter-spacing:3px;color:#8b8275;margin:0 0 20px;font-weight:600;">Complete Briefing</h2>`;
     items.forEach((item, i) => {
@@ -146,9 +141,7 @@ Respond ONLY with a valid JSON array. Each object: { "headline", "source", "sour
 
     // Step 3: Send email
     const { error: emailError } = await resend.emails.send({
-      from:
-        process.env.SENDER_EMAIL ||
-        "The Morning Brief <onboarding@resend.dev>",
+      from: process.env.SENDER_EMAIL || "The Morning Brief <onboarding@resend.dev>",
       to: [process.env.RECIPIENT_EMAIL],
       subject: `📊 The Morning Brief — ${dateStr}`,
       html,
@@ -158,11 +151,7 @@ Respond ONLY with a valid JSON array. Each object: { "headline", "source", "sour
       return NextResponse.json({ error: emailError.message }, { status: 500 });
     }
 
-    return NextResponse.json({
-      success: true,
-      itemCount: items.length,
-      sentTo: process.env.RECIPIENT_EMAIL,
-    });
+    return NextResponse.json({ success: true, itemCount: items.length, sentTo: process.env.RECIPIENT_EMAIL });
   } catch (err) {
     console.error("Cron error:", err);
     return NextResponse.json({ error: err.message }, { status: 500 });
